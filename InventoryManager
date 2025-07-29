@@ -1,0 +1,574 @@
+-- InventoryManager LocalScript (Place this inside the new InventoryUI ScreenGui)
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local screenGui = script.Parent -- This script's parent is now InventoryUI ScreenGui
+
+print("InventoryManager script started.")
+
+-- RemoteEvents (must be in ReplicatedStorage)
+local ChestItemAction = ReplicatedStorage:WaitForChild("ChestItemAction") -- For item transfers
+local UpdateInventoryUI = ReplicatedStorage:WaitForChild("UpdateInventoryUI") -- From server to update this UI
+
+-- --- Load centralized ItemData Module ---
+local ItemData = require(ReplicatedStorage:WaitForChild("ItemData"))
+print("DEBUG: ItemData module loaded in InventoryManager.")
+
+-- --- Load UIManager Module ---
+local UIManager = require(ReplicatedStorage:WaitForChild("UIManager"))
+print("DEBUG: UIManager module loaded in InventoryManager.")
+
+-- UI Configuration & Variables
+local INVENTORY_SLOT_SIZE = UDim2.new(0, 60, 0, 60) -- Size of each inventory slot
+local INVENTORY_PADDING = UDim2.new(0, 5, 0, 5)     -- Padding around slots
+local EQUIP_SLOT_SIZE = UDim2.new(0, 70, 0, 70)     -- Size of equip slots
+
+-- --- Client-Side Item Data (now from ModuleScript) ---
+local clientItemData = ItemData -- Use the loaded ItemData module
+
+-- --- Drag and Drop Variables ---
+local isDragging = false
+local draggedItemInfo = nil -- {itemData = {}, sourceSlot = Instance, sourceInventoryType = string, sourceChestId = string?}
+local draggedItemVisual = nil -- ImageLabel representing the dragged item
+
+-- --- UI Slot Caches ---
+local mainInventorySlots = {} -- Stores references to the UI slots in the main inventory grid
+local equipSlots = {}         -- Stores references to the UI slots in the equip slots frame
+
+-- Function to create a generic inventory/equip slot (reusable)
+local function createItemSlot(parentFrame, slotName)
+	local slot = Instance.new("Frame")
+	slot.Name = slotName
+	slot.Size = INVENTORY_SLOT_SIZE -- Default size, can be overridden for equip slots
+	slot.BackgroundColor3 = Color3.fromRGB(40, 35, 30) -- Darker brown/grey for empty slot
+	slot.BorderColor3 = Color3.fromRGB(80, 70, 60)
+	slot.BorderSizePixel = 1
+
+	local slotCorner = Instance.new("UICorner")
+	slotCorner.CornerRadius = UDim.new(0, 5)
+	slotCorner.Parent = slot
+
+	local slotStroke = Instance.new("UIStroke")
+	slotStroke.Color = Color3.fromRGB(120, 110, 100)
+	slotStroke.Thickness = 1
+	slotStroke.Transparency = 0.3
+	slotStroke.Parent = slot
+
+	-- Add an ImageLabel for the item icon
+	local itemIcon = Instance.new("ImageLabel")
+	itemIcon.Name = "ItemIcon"
+	itemIcon.Size = UDim2.new(1, 0, 1, 0) -- Fills the slot
+	itemIcon.BackgroundTransparency = 1
+	itemIcon.Image = "" -- No image by default
+	itemIcon.Parent = slot
+
+	-- Add a TextLabel for item count/stack size (optional, but good for RPGs)
+	local itemCountLabel = Instance.new("TextLabel")
+	itemCountLabel.Name = "ItemCount"
+	itemCountLabel.Size = UDim2.new(1, 0, 0.3, 0)
+	itemCountLabel.AnchorPoint = Vector2.new(1, 1)
+	itemCountLabel.Position = UDim2.new(1, 0, 1, 0)
+	itemCountLabel.BackgroundTransparency = 1
+	itemCountLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	itemCountLabel.TextScaled = true
+	itemCountLabel.Font = Enum.Font.SourceSansSemibold
+	itemCountLabel.TextXAlignment = Enum.TextXAlignment.Right
+	itemCountLabel.Text = "" -- No count by default
+	itemCountLabel.Parent = slot
+
+	-- --- NEW: Transparent ImageButton for click/drag detection ---
+	local clickDetector = Instance.new("ImageButton")
+	clickDetector.Name = "ClickDetector"
+	clickDetector.Size = UDim2.new(1, 0, 1, 0)
+	clickDetector.BackgroundTransparency = 1
+	clickDetector.ImageTransparency = 1 -- Make the button image completely transparent
+	clickDetector.Parent = slot
+
+	-- Bounding box / Hover effect for slots (now connected to the clickDetector)
+	local originalBorderColor = slot.BorderColor3
+	local originalStrokeColor = slotStroke.Color
+	local hoverBorderColor = Color3.fromRGB(255, 200, 0) -- Golden highlight
+	local hoverStrokeColor = Color3.fromRGB(255, 230, 150) -- Lighter golden highlight
+
+	clickDetector.MouseEnter:Connect(function() -- Use clickDetector for hover
+		slot.BorderColor3 = hoverBorderColor
+		slotStroke.Color = hoverStrokeColor
+		slotStroke.Thickness = 2 -- Make stroke slightly thicker on hover
+	end)
+
+	clickDetector.MouseLeave:Connect(function() -- Use clickDetector for hover
+		slot.BorderColor3 = originalBorderColor
+		slotStroke.Color = originalStrokeColor
+		slotStroke.Thickness = 1 -- Reset stroke thickness
+	end)
+
+	-- --- Drag and Drop Start (now connected to clickDetector) ---
+	clickDetector.MouseButton1Down:Connect(function()
+		if itemIcon.Image ~= "" and not isDragging then -- Only pick up if there's an item and not already dragging
+			isDragging = true
+			draggedItemInfo = {
+				itemData = {
+					itemId = itemIcon.Image:gsub("rbxassetid://", ""), -- Extract item ID from image (simple, improve later)
+					quantity = tonumber(itemCountLabel.Text) or 1 -- Get quantity
+				},
+				sourceSlot = slot,
+				sourceInventoryType = (slot.Parent == inventoryGridFrame and "Main" or "Equip"), -- Determine source type
+				sourceChestId = nil -- Only relevant if dragging from a chest
+			}
+			if draggedItemInfo.sourceInventoryType == "Equip" then
+				-- For equipped items, we need to know the slot type (HeadSlot, WeaponSlot, etc.)
+				draggedItemInfo.itemData.equipSlotType = slot.Name 
+			end
+
+			-- Create visual representation of dragged item
+			draggedItemVisual = itemIcon:Clone()
+			draggedItemVisual.BackgroundTransparency = 0.5 -- Make it semi-transparent
+			draggedItemVisual.Size = UDim2.new(0, 60, 0, 60) -- Standard size
+			draggedItemVisual.ZIndex = 10 -- Ensure it's on top of other UI
+			draggedItemVisual.Parent = screenGui -- Parent to ScreenGui to follow mouse anywhere
+
+			-- Hide the original item visual temporarily
+			itemIcon.Image = ""
+			itemCountLabel.Text = ""
+
+			print("DEBUG: Started dragging item: " .. draggedItemInfo.itemData.itemId)
+		end
+	end)
+	-- --- Drag and Drop End ---
+
+
+	slot.Parent = parentFrame
+	return slot
+end
+
+-- 1. Create the Inventory Toggle Button
+inventoryButton = Instance.new("TextButton")
+inventoryButton.Name = "InventoryToggle"
+inventoryButton.Size = UDim2.new(0, 100, 0, 40)
+inventoryButton.AnchorPoint = Vector2.new(1, 0) -- Top-right corner
+inventoryButton.Position = UDim2.new(1, -10, 0, 10) -- 10 pixels from right, 10 from top
+inventoryButton.Text = "Inventory"
+inventoryButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+inventoryButton.BackgroundColor3 = Color3.fromRGB(70, 90, 120) -- Muted blue/grey
+inventoryButton.Font = Enum.Font.Antique
+inventoryButton.TextScaled = true
+inventoryButton.BorderSizePixel = 0
+
+local invBtnCorner = Instance.new("UICorner")
+invBtnCorner.CornerRadius = UDim.new(0, 5)
+invBtnCorner.Parent = inventoryButton
+
+local invBtnStroke = Instance.new("UIStroke")
+invBtnStroke.Color = Color3.fromRGB(150, 170, 200)
+invBtnStroke.Thickness = 1
+invBtnStroke.Transparency = 0.1
+invBtnStroke.Parent = inventoryButton
+
+inventoryButton.Parent = screenGui -- Parent to InventoryUI ScreenGui
+print("DEBUG: Inventory toggle button created and parented. Type: " .. typeof(inventoryButton))
+
+-- 2. Create the Main Inventory Frame
+inventoryFrame = Instance.new("Frame")
+inventoryFrame.Name = "InventoryFrame"
+inventoryFrame.Size = UDim2.new(0.6, 0, 0.8, 0) -- 60% width, 80% height
+inventoryFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+inventoryFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+inventoryFrame.BackgroundColor3 = Color3.fromRGB(30, 25, 20) -- Dark, earthy brown
+inventoryFrame.BorderColor3 = Color3.fromRGB(70, 60, 50)
+inventoryFrame.BorderSizePixel = 2
+inventoryFrame.BackgroundTransparency = 0
+inventoryFrame.Visible = false -- Hidden by default
+
+local invFrameCorner = Instance.new("UICorner")
+invFrameCorner.CornerRadius = UDim.new(0, 10)
+invFrameCorner.Parent = inventoryFrame
+
+local invFrameStroke = Instance.new("UIStroke")
+invFrameStroke.Color = Color3.fromRGB(100, 90, 80)
+invFrameStroke.Thickness = 2
+invFrameStroke.Transparency = 0.2
+invFrameStroke.Parent = inventoryFrame
+
+inventoryFrame.Parent = screenGui -- Parent to InventoryUI ScreenGui
+print("DEBUG: Main Inventory frame created and parented. Visible: " .. tostring(inventoryFrame.Visible))
+
+-- 3. Create a Title for the Inventory Frame
+local invTitleLabel = Instance.new("TextLabel")
+invTitleLabel.Name = "InventoryTitle"
+invTitleLabel.Text = "Inventory"
+invTitleLabel.Size = UDim2.new(1, 0, 0.1, 0)
+invTitleLabel.AnchorPoint = Vector2.new(0.5, 0)
+invTitleLabel.Position = UDim2.new(0.5, 0, 0, 0)
+invTitleLabel.TextColor3 = Color3.fromRGB(255, 220, 150)
+invTitleLabel.TextScaled = true
+invTitleLabel.Font = Enum.Font.Antique
+invTitleLabel.TextWrapped = true
+invTitleLabel.TextXAlignment = Enum.TextXAlignment.Center
+invTitleLabel.BackgroundTransparency = 1
+invTitleLabel.Parent = inventoryFrame
+
+-- 4. Create the Inventory Grid Frame (for general items)
+inventoryGridFrame = Instance.new("ScrollingFrame")
+inventoryGridFrame.Name = "InventoryGrid"
+-- Position relative to its parent (inventoryFrame)
+-- Left half for grid (0.6 width of parent)
+inventoryGridFrame.Size = UDim2.new(0.65, 0, 0.85, 0)
+inventoryGridFrame.AnchorPoint = Vector2.new(0, 0)
+inventoryGridFrame.Position = UDim2.new(0, 0, 0.1, 0) -- Below title
+inventoryGridFrame.BackgroundColor3 = Color3.fromRGB(25, 20, 15)
+inventoryGridFrame.BorderColor3 = Color3.fromRGB(50, 45, 40)
+inventoryGridFrame.BorderSizePixel = 1
+inventoryGridFrame.BackgroundTransparency = 0
+inventoryGridFrame.CanvasSize = UDim2.new(0,0,0,0)
+inventoryGridFrame.ScrollBarImageColor3 = Color3.fromRGB(70, 60, 50)
+inventoryGridFrame.ScrollBarThickness = 6
+inventoryGridFrame.Parent = inventoryFrame
+
+local invGridCorner = Instance.new("UICorner")
+invGridCorner.CornerRadius = UDim.new(0, 8)
+invGridCorner.Parent = inventoryGridFrame
+
+-- Add UIGridLayout to automatically arrange slots
+local inventoryLayout = Instance.new("UIGridLayout")
+inventoryLayout.Name = "InventoryLayout"
+inventoryLayout.CellSize = INVENTORY_SLOT_SIZE
+inventoryLayout.CellPadding = INVENTORY_PADDING -- This now references the UDim2 variable
+inventoryLayout.FillDirection = Enum.FillDirection.Horizontal
+inventoryLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left -- Align to left
+inventoryLayout.SortOrder = Enum.SortOrder.LayoutOrder
+inventoryLayout.Parent = inventoryGridFrame
+print("Inventory grid frame and layout created.")
+
+-- 5. Create the Equip Slots Frame (for armor, weapon, shield)
+equipSlotsFrame = Instance.new("Frame")
+equipSlotsFrame.Name = "EquipSlots"
+-- Position relative to its parent (inventoryFrame)
+-- Right half for equip slots (0.35 width of parent)
+equipSlotsFrame.Size = UDim2.new(0.35, 0, 0.85, 0)
+equipSlotsFrame.AnchorPoint = Vector2.new(1, 0) -- Anchor to top-right
+equipSlotsFrame.Position = UDim2.new(1, 0, 0.1, 0) -- Positioned to the right below title
+equipSlotsFrame.BackgroundColor3 = Color3.fromRGB(20, 15, 10)
+equipSlotsFrame.BorderColor3 = Color3.fromRGB(50, 45, 40)
+equipSlotsFrame.BorderSizePixel = 1
+equipSlotsFrame.BackgroundTransparency = 0
+equipSlotsFrame.Parent = inventoryFrame
+
+local equipFrameCorner = Instance.new("UICorner")
+equipFrameCorner.CornerRadius = UDim.new(0, 8)
+equipFrameCorner.Parent = equipSlotsFrame
+
+-- Use a UIListLayout for vertical arrangement of equip slots
+local equipLayout = Instance.new("UIListLayout")
+equipLayout.Name = "EquipLayout"
+equipLayout.FillDirection = Enum.FillDirection.Vertical
+equipLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+equipLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+equipLayout.Padding = UDim.new(0, 10)
+equipLayout.SortOrder = Enum.SortOrder.LayoutOrder
+equipLayout.Parent = equipSlotsFrame
+print("Equip slots frame and layout created.")
+
+-- Create specific equip slots
+local headSlot = createItemSlot(equipSlotsFrame, "HeadSlot")
+headSlot.Size = EQUIP_SLOT_SIZE
+headSlot.LayoutOrder = 1
+local headLabel = Instance.new("TextLabel")
+headLabel.Text = "Head"
+headLabel.Size = UDim2.new(1,0,0.2,0)
+headLabel.Position = UDim2.new(0,0,0.8,0)
+headLabel.BackgroundTransparency = 1
+headLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+headLabel.TextScaled = true
+headLabel.Font = Enum.Font.SourceSansSemibold
+headLabel.TextXAlignment = Enum.TextXAlignment.Center
+headLabel.Parent = headSlot
+
+local chestSlot = createItemSlot(equipSlotsFrame, "ChestSlot")
+chestSlot.Size = EQUIP_SLOT_SIZE
+chestSlot.LayoutOrder = 2
+local chestLabel = Instance.new("TextLabel")
+chestLabel.Text = "Chest"
+chestLabel.Size = UDim2.new(1,0,0.2,0)
+chestLabel.Position = UDim2.new(0,0,0.8,0)
+chestLabel.BackgroundTransparency = 1
+chestLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+chestLabel.TextScaled = true
+chestLabel.Font = Enum.Font.SourceSansSemibold
+chestLabel.TextXAlignment = Enum.TextXAlignment.Center
+chestLabel.Parent = chestSlot
+
+local legsSlot = createItemSlot(equipSlotsFrame, "LegsSlot")
+legsSlot.Size = EQUIP_SLOT_SIZE
+legsSlot.LayoutOrder = 3
+local legsLabel = Instance.new("TextLabel")
+legsLabel.Text = "Legs"
+legsLabel.Size = UDim2.new(1,0,0.2,0)
+legsLabel.Position = UDim2.new(0,0,0.8,0)
+legsLabel.BackgroundTransparency = 1
+legsLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+legsLabel.TextScaled = true
+legsLabel.Font = Enum.Font.SourceSansSemibold
+legsLabel.TextXAlignment = Enum.TextXAlignment.Center
+legsLabel.Parent = legsSlot
+
+local feetSlot = createItemSlot(equipSlotsFrame, "FeetSlot")
+feetSlot.Size = EQUIP_SLOT_SIZE
+feetSlot.LayoutOrder = 4
+local feetLabel = Instance.new("TextLabel")
+feetLabel.Text = "Feet"
+feetLabel.Size = UDim2.new(1,0,0.2,0)
+feetLabel.Position = UDim2.new(0,0,0.8,0)
+feetLabel.BackgroundTransparency = 1
+feetLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+feetLabel.TextScaled = true
+feetLabel.Font = Enum.Font.SourceSansSemibold
+feetLabel.TextXAlignment = Enum.TextXAlignment.Center
+feetLabel.Parent = feetSlot
+
+local weaponSlot = createItemSlot(equipSlotsFrame, "WeaponSlot")
+weaponSlot.Size = EQUIP_SLOT_SIZE
+weaponSlot.LayoutOrder = 5
+local weaponLabel = Instance.new("TextLabel")
+weaponLabel.Text = "Weapon"
+weaponLabel.Size = UDim2.new(1,0,0.2,0)
+weaponLabel.Position = UDim2.new(0,0,0.8,0)
+weaponLabel.BackgroundTransparency = 1
+weaponLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+weaponLabel.TextScaled = true
+weaponLabel.Font = Enum.Font.SourceSansSemibold
+weaponLabel.TextXAlignment = Enum.TextXAlignment.Center
+weaponLabel.Parent = weaponSlot
+
+local shieldSlot = createItemSlot(equipSlotsFrame, "ShieldSlot")
+shieldSlot.Size = EQUIP_SLOT_SIZE
+shieldSlot.LayoutOrder = 6
+local shieldLabel = Instance.new("TextLabel")
+shieldLabel.Text = "Shield"
+shieldLabel.Size = UDim2.new(1,0,0.2,0)
+shieldLabel.Position = UDim2.new(0,0,0.8,0)
+shieldLabel.BackgroundTransparency = 1
+shieldLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+shieldLabel.TextScaled = true
+shieldLabel.Font = Enum.Font.SourceSansSemibold
+shieldLabel.TextXAlignment = Enum.TextXAlignment.Center
+shieldLabel.Parent = shieldSlot
+
+print("Equip slots created.")
+
+-- --- UI Population Function ---
+local function populateMainInventorySlots(inventoryTable)
+	print("DEBUG: Populating main inventory with " .. #inventoryTable .. " items.")
+	for _, child in ipairs(inventoryGridFrame:GetChildren()) do
+		if child:IsA("Frame") and child.Name ~= "UIGridLayout" and child.Name ~= "UIListLayout" then -- Exclude layouts
+			child:Destroy()
+		end
+	end
+	table.clear(mainInventorySlots)
+
+	local maxGeneralSlots = 25
+	for i = 1, maxGeneralSlots do
+		local slot = createItemSlot(inventoryGridFrame, "MainSlot" .. i)
+		local itemIcon = slot:FindFirstChild("ItemIcon")
+		local itemCountLabel = slot:FindFirstChild("ItemCount")
+
+		local itemData = inventoryTable[i]
+		if itemData and clientItemData[itemData.itemId] then
+			local itemDef = clientItemData[itemData.itemId]
+			itemIcon.Image = itemDef.Icon
+			itemCountLabel.Text = (itemData.quantity > 1 and itemData.quantity or "")
+		else
+			itemIcon.Image = ""
+			itemCountLabel.Text = ""
+		end
+		mainInventorySlots[i] = slot
+	end
+
+	inventoryGridFrame.CanvasSize = UDim2.new(0, 0, 0, inventoryLayout.AbsoluteContentSize.Y)
+	print("DEBUG: Main inventory slots populated and CanvasSize updated.")
+end
+
+-- --- Drag and Drop Logic ---
+function script.startDrag(info) -- EXPOSED: For other scripts (like ChestUIManager) to initiate a drag
+	if isDragging then warn("DEBUG: Attempted to start drag while already dragging. Ignoring.") return end
+
+	isDragging = true
+	draggedItemInfo = info
+
+	local itemIconOriginal = info.sourceSlot:FindFirstChild("ItemIcon")
+	local itemCountLabelOriginal = info.sourceSlot:FindFirstChild("ItemCount")
+
+	if itemIconOriginal and itemIconOriginal.Image ~= "" then
+		draggedItemVisual = itemIconOriginal:Clone()
+		draggedItemVisual.BackgroundTransparency = 0.5
+		draggedItemVisual.Size = UDim2.new(0, 60, 0, 60)
+		draggedItemVisual.ZIndex = 10
+		draggedItemVisual.Parent = screenGui
+
+		itemIconOriginal.Image = "" -- Hide original
+		itemCountLabelOriginal.Text = ""
+		print("DEBUG: Started dragging item (initiated externally): " .. draggedItemInfo.itemData.itemId)
+	else
+		warn("DEBUG: Attempted to start drag from an empty slot or missing ItemIcon.")
+		isDragging = false -- Reset
+		draggedItemInfo = nil
+	end
+end
+
+UserInputService.InputChanged:Connect(function(input, gameProcessedEvent)
+	if isDragging and draggedItemVisual and input.UserInputType == Enum.UserInputType.MouseMovement then
+		draggedItemVisual.Position = UDim2.new(0, input.Position.X - draggedItemVisual.Size.X.Offset / 2,
+			0, input.Position.Y - draggedItemVisual.Size.Y.Offset / 2)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessedEvent)
+	if isDragging and input.UserInputType == Enum.UserInputType.MouseButton1 then
+		print("DEBUG: Drag ended. Processing drop.")
+		isDragging = false
+		if draggedItemVisual then draggedItemVisual:Destroy() end -- Defensive check
+
+		local mouse = LocalPlayer:GetMouse()
+		local targetGui = mouse.Target -- The UI element the mouse is over when dropped
+
+		local destinationSlot = nil
+		local destinationInventoryType = nil
+		local destinationChestId = nil -- Only if dropping into a chest UI
+
+		-- Check if dropped onto a valid inventory slot
+		if targetGui and targetGui.Name == "ClickDetector" and targetGui.Parent and targetGui.Parent:IsA("Frame") then
+			local slotFrame = targetGui.Parent
+			print("DEBUG: Dropped onto a ClickDetector in slot: " .. slotFrame.Name .. ", parent: " .. slotFrame.Parent.Name)
+
+			if slotFrame.Parent == inventoryGridFrame then
+				destinationSlot = slotFrame
+				destinationInventoryType = "Main"
+				print("DEBUG: Identified drop as Main Inventory slot.")
+			elseif slotFrame.Parent == equipSlotsFrame then
+				destinationSlot = slotFrame
+				destinationInventoryType = "Equip"
+				destinationIsEquipSlot = true
+				print("DEBUG: Identified drop as Equip Slot: " .. slotFrame.Name)
+			end
+		end
+
+		-- Check if dropped onto a chest UI slot (need to find ChestUIManager's chestGridFrame)
+		-- This requires a reference to the ChestUIManager script or its exposed properties.
+		local chestUIManager = UIManager.GetChestUIManager() -- Use UIManager to get the script
+		if chestUIManager and chestUIManager.chestGridFrame then -- Check if chestGridFrame exists on the returned script
+			print("DEBUG: Found ChestUIManager script and its chestGridFrame.")
+			if targetGui and targetGui.Name == "ClickDetector" and targetGui.Parent and targetGui.Parent:IsA("Frame") then
+				local slotFrame = targetGui.Parent
+				if slotFrame.Parent == chestUIManager.chestGridFrame then
+					destinationSlot = slotFrame
+					destinationInventoryType = "Chest"
+					-- Access currentChest via UIManager
+					destinationChestId = UIManager.GetCurrentChest() and UIManager.GetCurrentChest().Name
+					print("DEBUG: Identified drop as Chest Inventory slot: " .. slotFrame.Name .. ", ChestID: " .. (destinationChestId or "nil"))
+				end
+			end
+		else
+			print("DEBUG: ChestUIManager script or chestGridFrame not found, or chest not open.")
+		end
+
+		-- --- Process the Item Transfer (if valid drop target) ---
+		if destinationSlot and draggedItemInfo then
+			print("DEBUG: Valid drop target found for transfer. Source: " .. draggedItemInfo.sourceInventoryType .. ", Dest: " .. destinationInventoryType)
+
+			-- Basic validation for equip slots (can be expanded server-side)
+			if destinationIsEquipSlot and draggedItemInfo.itemData.equipSlotType then -- Check if item has equipSlotType
+				local itemDef = clientItemData[draggedItemInfo.itemData.itemId]
+				if not itemDef or itemDef.EquipSlot ~= destinationSlot.Name then
+					warn("DEBUG: Attempted to equip wrong item type or invalid item to slot " .. destinationSlot.Name)
+					-- Visually return item to source, server will handle actual data
+					local itemIcon = draggedItemInfo.sourceSlot:FindFirstChild("ItemIcon")
+					local itemCountLabel = draggedItemInfo.sourceSlot:FindFirstChild("ItemCount")
+					itemIcon.Image = "rbxassetid://" .. draggedItemInfo.itemData.itemId
+					itemCountLabel.Text = (draggedItemInfo.itemData.quantity > 1 and draggedItemInfo.itemData.quantity or "")
+					draggedItemInfo = nil
+					return
+				end
+			end
+
+			-- Fire RemoteEvent to server to handle item transfer
+			ChestItemAction:FireServer(
+				"MoveItem",
+				draggedItemInfo.itemData,
+				draggedItemInfo.sourceInventoryType,
+				draggedItemInfo.sourceChestId, -- Will be nil if from Main/Equip
+				destinationInventoryType,
+				destinationChestId -- Will be nil if to Main/Equip
+			)
+		else
+			print("DEBUG: Item dropped onto invalid location. Returning item to source.")
+			-- If dropped invalidly, return item to its original slot (visual only, server will correct data)
+			local itemIcon = draggedItemInfo.sourceSlot:FindFirstChild("ItemIcon")
+			local itemCountLabel = draggedItemInfo.sourceSlot:FindFirstChild("ItemCount")
+			itemIcon.Image = "rbxassetid://" .. draggedItemInfo.itemData.itemId
+			itemCountLabel.Text = (draggedItemInfo.itemData.quantity > 1 and draggedItemInfo.itemData.quantity or "")
+		end
+		draggedItemInfo = nil -- Clear dragged item info
+	end
+end)
+
+-- Inventory Toggle Logic
+inventoryButton.MouseButton1Click:Connect(function()
+	print("Inventory button clicked!")
+	inventoryFrame.Visible = not inventoryFrame.Visible
+	print("Inventory visibility toggled to: " .. tostring(inventoryFrame.Visible))
+	if inventoryFrame.Visible then
+		UserInputService.ModalEnabled = true
+		print("UserInputService.ModalEnabled set to true.")
+		UpdateInventoryUI:FireServer("Main") -- Request main inventory data
+	else
+		UserInputService.ModalEnabled = false
+		print("UserInputService.ModalEnabled set to false.")
+	end
+end)
+
+-- Toggle inventory with 'Q' key (changed from 'I')
+UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+	print("InputBegan detected. KeyCode: " .. tostring(input.KeyCode.Name) .. ", gameProcessedEvent: " .. tostring(gameProcessedEvent))
+	if gameProcessedEvent and input.UserInputType == Enum.UserInputType.Keyboard and not UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) and not UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then
+		if input.KeyCode == Enum.KeyCode.Q then
+			print("Allowing 'Q' key despite gameProcessedEvent (likely chat).")
+		else
+			print("Input was consumed by another Roblox process. Ignoring.")
+			return
+		end
+	end
+
+	if input.KeyCode == Enum.KeyCode.Q then -- Changed key to 'Q'
+		print("'Q' key pressed!")
+		inventoryFrame.Visible = not inventoryFrame.Visible
+		print("Inventory visibility toggled by 'Q' key to: " .. tostring(inventoryFrame.Visible))
+		if inventoryFrame.Visible then
+			UserInputService.ModalEnabled = true
+			print("UserInputService.ModalEnabled set to true.")
+			UpdateInventoryUI:FireServer("Main") -- Request main inventory data
+		else
+			UserInputService.ModalEnabled = false
+			print("UserInputService.ModalEnabled set to false.")
+		end
+	end
+end)
+
+-- Listen for updates from the server for player's main inventory
+UpdateInventoryUI.OnClientEvent:Connect(function(inventoryData)
+	print("DEBUG: Received main inventory update from server (for InventoryManager):", inventoryData)
+	populateMainInventorySlots(inventoryData)
+end)
+
+-- --- EXPOSE InventoryManager's elements/functions to UIManager ---
+-- These must be assigned AFTER the elements are created.
+task.spawn(function() -- Use task.spawn to allow the rest of the script to run first
+	task.wait(0.5) -- Small delay to ensure UIManager is also ready to receive references
+	UIManager:SetInventoryManager(script)
+	script.inventoryGridFrame = inventoryGridFrame -- Expose for UIManager
+	script.equipSlotsFrame = equipSlotsFrame     -- Expose for UIManager
+	print("DEBUG: InventoryManager has exposed its references to UIManager.")
+end)
+
+
+print("DEBUG: InventoryManager script fully initialized and listeners connected.")
