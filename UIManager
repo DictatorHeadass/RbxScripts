@@ -1,0 +1,85 @@
+-- UIManager ModuleScript (Place this in ReplicatedStorage)
+-- This module acts as a central manager for client-side UI components and functions,
+-- ensuring proper referencing between InventoryManager and ChestUIManager.
+
+local UIManager = {}
+
+-- Cached references to the main UI scripts
+local _inventoryManagerScript = nil
+local _chestUIManagerScript = nil
+
+-- --- Private Helper Functions (for internal use by UIManager) ---
+
+local function getInventoryManager()
+	-- This function ensures we have a valid reference to the InventoryManager script
+	while not _inventoryManagerScript do
+		local playerGui = game.Players.LocalPlayer:WaitForChild("PlayerGui")
+		local inventoryUI = playerGui:WaitForChild("InventoryUI")
+		_inventoryManagerScript = inventoryUI:WaitForChild("InventoryManager")
+		print("DEBUG: UIManager: Successfully got InventoryManager script reference.")
+	end
+	return _inventoryManagerScript
+end
+
+local function getChestUIManager()
+	-- This function ensures we have a valid reference to the ChestUIManager script
+	while not _chestUIManagerScript do
+		local playerGui = game.Players.LocalPlayer:WaitForChild("PlayerGui")
+		local chestUI = playerGui:WaitForChild("ChestUI")
+		_chestUIManagerScript = chestUI:WaitForChild("ChestUIManager")
+		print("DEBUG: UIManager: Successfully got ChestUIManager script reference.")
+	end
+	return _chestUIManagerScript
+end
+
+
+-- --- Public Functions for UIManager ---
+
+-- Expose the startDrag function from InventoryManager
+function UIManager:StartDrag(info)
+	local invManager = getInventoryManager()
+	-- Now, we can safely call startDrag on the InventoryManager script itself
+	if invManager and invManager.startDrag then
+		invManager.startDrag(info)
+	else
+		warn("DEBUG: UIManager: InventoryManager or its startDrag function not ready.")
+	end
+end -- CLOSING 'end' for StartDrag function
+
+-- Expose the chestGridFrame from ChestUIManager
+function UIManager:GetChestGridFrame()
+	local chestUIManager = getChestUIManager()
+	-- We assume ChestUIManager exposes chestGridFrame as a direct property (script.chestGridFrame)
+	return chestUIManager.chestGridFrame
+end -- CLOSING 'end' for GetChestGridFrame function
+
+-- Expose the currentChest from ChestUIManager
+function UIManager:GetCurrentChest()
+	local chestUIManager = getChestUIManager()
+	-- We assume ChestUIManager exposes currentChest as a direct property (script.currentChest)
+	return chestUIManager.currentChest
+end -- CLOSING 'end' for GetCurrentChest function
+
+-- Expose InventoryManager's grid frame
+function UIManager:GetMainInventoryGridFrame()
+	local invManager = getInventoryManager()
+	return invManager.inventoryGridFrame
+end -- CLOSING 'end' for GetMainInventoryGridFrame function
+
+-- Expose InventoryManager's equip slots frame
+function UIManager:GetEquipSlotsFrame()
+	local invManager = getInventoryManager()
+	return invManager.equipSlotsFrame
+end -- CLOSING 'end' for GetEquipSlotsFrame function
+
+-- Function to set the current chest being interacted with (called by ChestUIManager)
+function UIManager:SetCurrentChest(chestPart)
+	_currentChest = chestPart
+	-- If ChestUIManager is already loaded, update its internal reference too for consistency
+	if _chestUIManagerScript then
+		_chestUIManagerScript.currentChest = chestPart
+	end
+	print("DEBUG: UIManager: currentChest set to " .. (chestPart and chestPart.Name or "nil"))
+end -- CLOSING 'end' for SetCurrentChest function
+
+return UIManager
