@@ -1,0 +1,464 @@
+-- ChestUIManager LocalScript (Place this inside the new ChestUI ScreenGui)
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local screenGui = script.Parent -- This script's parent is now ChestUI ScreenGui
+local RunService = game:GetService("RunService")
+
+print("DEBUG: ChestUIManager script has started execution.")
+print("DEBUG: Script parent (ScreenGui) is: " .. screenGui.Name .. ", Enabled: " .. tostring(screenGui.Enabled) .. ", Visible: " .. tostring(screenGui.Enabled))
+
+
+-- RemoteEvents (must be in ReplicatedStorage)
+local OpenChestEvent = ReplicatedStorage:WaitForChild("OpenChestEvent")
+local ChestItemAction = ReplicatedStorage:WaitForChild("ChestItemAction")
+local UpdateInventoryUI = ReplicatedStorage:WaitForChild("UpdateInventoryUI") 
+local UpdateChestUI = ReplicatedStorage:WaitForChild("UpdateChestUI")     
+
+-- --- Load centralized ItemData Module ---
+local ItemData = require(ReplicatedStorage:WaitForChild("ItemData"))
+print("DEBUG: ItemData module loaded in ChestUIManager.")
+
+-- --- Load UIManager Module ---
+local UIManager = require(ReplicatedStorage:WaitForChild("UIManager"))
+print("DEBUG: UIManager module loaded in ChestUIManager.")
+
+-- UI Configuration & Variables
+local CHEST_SLOT_SIZE = UDim2.new(0, 60, 0, 60) -- Size of each item slot in the chest UI
+local CHEST_PADDING = UDim2.new(0, 5, 0, 5)     -- Padding around slots
+local INTERACTION_DISTANCE = 30 -- Max distance to interact with a chest (in studs)
+
+-- Declare UI elements
+local chestFrame      -- The main chest window
+local chestGridFrame  -- The scrolling frame for chest items
+local chestTitleLabel -- Title of the chest UI
+
+-- Hover UI elements
+local hoverNameBillboardGui -- The BillboardGui for the hover name
+local hoverNameTextLabel    -- The TextLabel inside the BillboardGui
+
+-- --- Client-Side Item Data (now from ModuleScript) ---
+local clientItemData = ItemData -- Use the loaded ItemData module
+
+local function createItemSlot(parentFrame, slotName)
+	local slot = Instance.new("Frame")
+	slot.Name = slotName
+	slot.Size = CHEST_SLOT_SIZE
+	slot.BackgroundColor3 = Color3.fromRGB(45, 40, 35)
+	slot.BorderColor3 = Color3.fromRGB(90, 80, 70)
+	slot.BorderSizePixel = 1
+
+	local slotCorner = Instance.new("UICorner")
+	slotCorner.CornerRadius = UDim.new(0, 5)
+	slotCorner.Parent = slot
+
+	local slotStroke = Instance.new("UIStroke")
+	slotStroke.Color = Color3.fromRGB(130, 120, 110)
+	slotStroke.Thickness = 1
+	slotStroke.Transparency = 0.3
+	slotStroke.Parent = slot
+
+	local itemIcon = Instance.new("ImageLabel")
+	itemIcon.Name = "ItemIcon"
+	itemIcon.Size = UDim2.new(1, 0, 1, 0)
+	itemIcon.BackgroundTransparency = 1
+	itemIcon.Image = ""
+	itemIcon.Parent = slot
+
+	local itemCountLabel = Instance.new("TextLabel")
+	itemCountLabel.Name = "ItemCount"
+	itemCountLabel.Size = UDim2.new(1, 0, 0.3, 0)
+	itemCountLabel.AnchorPoint = Vector2.new(1, 1)
+	itemCountLabel.Position = UDim2.new(1, 0, 1, 0)
+	itemCountLabel.BackgroundTransparency = 1
+	itemCountLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	itemCountLabel.TextScaled = true
+	itemCountLabel.Font = Enum.Font.SourceSansSemibold
+	itemCountLabel.TextXAlignment = Enum.TextXAlignment.Right
+	itemCountLabel.Text = ""
+	itemCountLabel.Parent = slot
+
+	-- --- NEW: Transparent ImageButton for click/drag detection ---
+	local clickDetector = Instance.new("ImageButton")
+	clickDetector.Name = "ClickDetector"
+	clickDetector.Size = UDim2.new(1, 0, 1, 0)
+	clickDetector.BackgroundTransparency = 1
+	clickDetector.ImageTransparency = 1
+	clickDetector.Parent = slot
+
+	local originalBorderColor = slot.BorderColor3
+	local originalStrokeColor = slotStroke.Color
+	local hoverBorderColor = Color3.fromRGB(255, 200, 0)
+	local hoverStrokeColor = Color3.fromRGB(255, 230, 150)
+
+	clickDetector.MouseEnter:Connect(function()
+		slot.BorderColor3 = hoverBorderColor
+		slotStroke.Color = hoverStrokeColor
+		slotStroke.Thickness = 2
+	end)
+
+	clickDetector.MouseLeave:Connect(function()
+		slot.BorderColor3 = originalBorderColor
+		slotStroke.Color = originalStrokeColor
+		slotStroke.Thickness = 1
+	end)
+
+	-- ADDED DRAG AND DROP START FOR CHEST SLOTS (calls UIManager.StartDrag)
+	clickDetector.MouseButton1Down:Connect(function()
+		if itemIcon.Image ~= "" then -- Only pick up if there's an item
+			print("DEBUG: Chest slot initiating drag via UIManager.")
+			UIManager:StartDrag({
+				itemData = {
+					itemId = itemIcon.Image:gsub("rbxassetid://", ""),
+					quantity = tonumber(itemCountLabel.Text) or 1
+				},
+				sourceSlot = slot,
+				sourceInventoryType = "Chest",
+				sourceChestId = UIManager:GetCurrentChest() and UIManager:GetCurrentChest().Name -- Get current chest ID via UIManager
+			})
+		else
+			warn("DEBUG: Attempted to start drag from an empty slot or missing ItemIcon in chest.")
+		end
+	end)
+	-- END ADDED DRAG AND DROP START FOR CHEST SLOTS
+
+	slot.Parent = parentFrame
+	return slot
+end
+
+-- 1. Create the Main Chest Frame
+chestFrame = Instance.new("Frame")
+chestFrame.Name = "ChestFrame"
+chestFrame.Size = UDim2.new(0.5, 0, 0.7, 0)
+chestFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+chestFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+chestFrame.BackgroundColor3 = Color3.fromRGB(35, 30, 25)
+chestFrame.BorderColor3 = Color3.fromRGB(80, 70, 60)
+chestFrame.BorderSizePixel = 2
+chestFrame.BackgroundTransparency = 0
+chestFrame.Visible = false
+
+local chestFrameCorner = Instance.new("UICorner")
+chestFrameCorner.CornerRadius = UDim.new(0, 10)
+chestFrameCorner.Parent = chestFrame
+
+local chestFrameStroke = Instance.new("UIStroke")
+chestFrameStroke.Color = Color3.fromRGB(110, 100, 90)
+chestFrameStroke.Thickness = 2
+chestFrameStroke.Transparency = 0.2
+chestFrameStroke.Parent = chestFrame
+
+chestFrame.Parent = screenGui
+print("DEBUG: Main Chest frame created and parented. Visible: " .. tostring(chestFrame.Visible))
+
+-- 2. Create a Title for the Chest Frame
+chestTitleLabel = Instance.new("TextLabel")
+chestTitleLabel.Name = "ChestTitle"
+chestTitleLabel.Text = "Storage Chest"
+chestTitleLabel.Size = UDim2.new(1, 0, 0.1, 0)
+chestTitleLabel.AnchorPoint = Vector2.new(0.5, 0)
+chestTitleLabel.Position = UDim2.new(0.5, 0, 0, 0)
+chestTitleLabel.TextColor3 = Color3.fromRGB(255, 220, 150)
+chestTitleLabel.TextScaled = true
+chestTitleLabel.Font = Enum.Font.Antique
+chestTitleLabel.TextWrapped = true
+chestTitleLabel.TextXAlignment = Enum.TextXAlignment.Center
+chestTitleLabel.TextYAlignment = Enum.TextYAlignment.Center
+chestTitleLabel.BackgroundTransparency = 1
+chestTitleLabel.Parent = chestFrame
+print("DEBUG: Chest title label created.")
+
+-- 3. Create the Chest Item Grid Frame
+chestGridFrame = Instance.new("ScrollingFrame")
+chestGridFrame.Name = "ChestGrid"
+chestGridFrame.Size = UDim2.new(0.9, 0, 0.8, 0)
+chestGridFrame.AnchorPoint = Vector2.new(0.5, 0)
+chestGridFrame.Position = UDim2.new(0.5, 0, 0.1, 0)
+chestGridFrame.BackgroundColor3 = Color3.fromRGB(28, 23, 18)
+chestGridFrame.BorderColor3 = Color3.fromRGB(55, 50, 45)
+chestGridFrame.BorderSizePixel = 1
+chestGridFrame.BackgroundTransparency = 0
+chestGridFrame.CanvasSize = UDim2.new(0,0,0,0)
+chestGridFrame.ScrollBarImageColor3 = Color3.fromRGB(75, 65, 55)
+chestGridFrame.ScrollBarThickness = 6
+chestGridFrame.Parent = chestFrame
+
+local chestGridCorner = Instance.new("UICorner")
+chestGridCorner.CornerRadius = UDim.new(0, 8)
+chestGridCorner.Parent = chestGridFrame
+
+local chestLayout = Instance.new("UIGridLayout")
+chestLayout.Name = "ChestLayout"
+chestLayout.CellSize = CHEST_SLOT_SIZE
+chestLayout.CellPadding = CHEST_PADDING
+chestLayout.FillDirection = Enum.FillDirection.Horizontal
+chestLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+chestLayout.SortOrder = Enum.SortOrder.LayoutOrder
+chestLayout.Parent = chestGridFrame
+print("DEBUG: Chest grid frame and layout created.")
+
+-- 4. Create the Close Button
+local closeButton = Instance.new("TextButton")
+closeButton.Name = "CloseButton"
+closeButton.Size = UDim2.new(0.2, 0, 0.08, 0)
+closeButton.AnchorPoint = Vector2.new(0.5, 1)
+closeButton.Position = UDim2.new(0.5, 0, 1, -10)
+closeButton.Text = "Close"
+closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeButton.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+closeButton.Font = Enum.Font.SourceSansBold
+closeButton.TextScaled = true
+closeButton.BorderSizePixel = 0
+
+local closeBtnCorner = Instance.new("UICorner")
+closeBtnCorner.CornerRadius = UDim.new(0, 5)
+closeBtnCorner.Parent = closeButton
+
+closeButton.MouseButton1Click:Connect(function()
+	chestFrame.Visible = false
+	UserInputService.ModalEnabled = false
+	print("DEBUG: Chest UI closed.")
+end)
+closeButton.Parent = chestFrame
+print("DEBUG: Close button created.")
+
+-- --- Hover Name UI (BillboardGui) ---
+hoverNameBillboardGui = Instance.new("BillboardGui")
+hoverNameBillboardGui.Name = "HoverName"
+hoverNameBillboardGui.Size = UDim2.new(0, 150, 0, 30)
+hoverNameBillboardGui.StudsOffset = Vector3.new(0, 2, 0)
+hoverNameBillboardGui.AlwaysOnTop = true
+hoverNameBillboardGui.ExtentsOffset = Vector3.new(0, 0.5, 0)
+hoverNameBillboardGui.Enabled = false
+
+hoverNameTextLabel = Instance.new("TextLabel")
+hoverNameTextLabel.Name = "NameLabel"
+hoverNameTextLabel.Size = UDim2.new(1, 0, 1, 0)
+hoverNameTextLabel.BackgroundTransparency = 1
+hoverNameTextLabel.Text = "Click to open"
+hoverNameTextLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+hoverNameTextLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+hoverNameTextLabel.TextStrokeTransparency = 0.5
+hoverNameTextLabel.Font = Enum.Font.SourceSansSemibold
+hoverNameTextLabel.TextScaled = true
+hoverNameTextLabel.TextXAlignment = Enum.TextXAlignment.Center
+hoverNameTextLabel.TextYAlignment = Enum.TextYAlignment.Center
+hoverNameTextLabel.Parent = hoverNameBillboardGui
+print("DEBUG: Hover name BillboardGui created. Enabled: " .. tostring(hoverNameBillboardGui.Enabled))
+
+-- --- Client-Side Interaction Logic ---
+
+-- EXPOSED: Make currentChest and chestGridFrame accessible to other scripts via UIManager
+-- These are now local variables within this script's scope.
+local currentChest = nil 
+-- script.currentChest will be set via UIManager:SetCurrentChest()
+
+local playerMainInventorySlots = {}
+local chestInventorySlots = {}
+
+local function populateSlots(gridFrame, inventoryTable, uiSlotCache)
+	print("DEBUG: populateSlots called for: " .. gridFrame.Name .. ", with " .. #inventoryTable .. " items.")
+	for _, child in ipairs(gridFrame:GetChildren()) do
+		if child:IsA("Frame") and child.Name ~= "UIGridLayout" and child.Name ~= "UIListLayout" then
+			child:Destroy()
+		end
+	end
+	table.clear(uiSlotCache)
+
+	local maxSlots = 20 
+	for i = 1, maxSlots do
+		local slot = createItemSlot(gridFrame, "Slot" .. i)
+		local itemIcon = slot:FindFirstChild("ItemIcon")
+		local itemCountLabel = slot:FindFirstChild("ItemCount")
+
+		local itemData = inventoryTable[i]
+		if itemData and clientItemData[itemData.itemId] then
+			local itemDef = clientItemData[itemData.itemId]
+			itemIcon.Image = itemDef.Icon
+			itemCountLabel.Text = (itemData.quantity > 1 and itemData.quantity or "")
+		else
+			itemIcon.Image = ""
+			itemCountLabel.Text = ""
+		end
+		uiSlotCache[i] = slot
+	end
+
+	gridFrame.CanvasSize = UDim2.new(0, 0, 0, chestLayout.AbsoluteContentSize.Y)
+	print("DEBUG: Slots populated and CanvasSize updated for " .. gridFrame.Name)
+end
+
+local function openChestUI(chestPartName, chestInventoryData)
+	chestTitleLabel.Text = chestPartName
+	chestFrame.Visible = true
+	UserInputService.ModalEnabled = true
+	print("DEBUG: Chest UI opened for: " .. chestPartName .. ". Frame Visible: " .. tostring(chestFrame.Visible))
+
+	populateSlots(chestGridFrame, chestInventoryData, chestInventorySlots)
+
+	hoverNameBillboardGui.Enabled = false
+	print("DEBUG: Hover UI disabled when chest opened.")
+end
+
+-- Re-establish reliable character and camera references
+local character = nil
+local humanoidRootPart = nil
+local camera = nil
+
+local function updateCharacterAndCamera()
+	character = LocalPlayer.Character
+	if character then
+		humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+		print("DEBUG: HumanoidRootPart found: " .. humanoidRootPart.Name)
+	else
+		print("DEBUG: Character not yet available.")
+	end
+	camera = Workspace.CurrentCamera
+	print("DEBUG: Camera set: " .. camera.Name)
+end
+
+LocalPlayer.CharacterAdded:Connect(updateCharacterAndCamera)
+if LocalPlayer.Character then
+	updateCharacterAndCamera()
+else
+	LocalPlayer.CharacterAdded:Wait()
+	updateCharacterAndCamera()
+end
+print("DEBUG: Character and camera update listener set up.")
+
+
+-- Listen for MouseButton1 (Left Click) to interact with chests
+UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+	if gameProcessedEvent then print("DEBUG: Input processed by game, ignoring click.") return end
+	if chestFrame.Visible then print("DEBUG: Chest UI already visible, ignoring click.") return end
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		print("DEBUG: MouseButton1 clicked.")
+		if not character then print("DEBUG: Character is nil on click, cannot raycast.") return end
+		if not humanoidRootPart then print("DEBUG: HumanoidRootPart is nil on click, cannot raycast.") return end
+		if not camera then print("DEBUG: Camera is nil on click, cannot raycast.") return end
+
+		local mouse = LocalPlayer:GetMouse()
+		local rayOrigin = camera.CFrame.Position
+		local rayDirection = (mouse.Hit.p - rayOrigin).Unit * INTERACTION_DISTANCE
+
+		local raycastParams = Instance.new("RaycastParams") -- Ensure RaycastParams is created here
+		raycastParams.FilterDescendantsInstances = {character}
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+		local raycastResult = Workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+
+		if raycastResult then
+			print("DEBUG: Raycast hit: " .. raycastResult.Instance.Name .. " at " .. tostring(raycastResult.Position))
+			local distanceToHit = (raycastResult.Instance.Position - humanoidRootPart.Position).Magnitude
+			print("DEBUG: Distance to hit: " .. math.floor(distanceToHit) .. " studs.")
+		else
+			print("DEBUG: Raycast hit nothing on click.")
+		end
+
+		if raycastResult and raycastResult.Instance then
+			local hitPart = raycastResult.Instance
+			local distanceToHit = (hitPart.Position - humanoidRootPart.Position).Magnitude
+
+			if string.find(hitPart.Name, "Chest_", 1, true) and distanceToHit <= INTERACTION_DISTANCE then
+				print("DEBUG: Detected interaction with chest: " .. hitPart.Name .. " (Distance: " .. math.floor(distanceToHit) .. " studs)")
+				currentChest = hitPart -- Assign to local variable first
+				UIManager:SetCurrentChest(currentChest) -- THEN assign via UIManager
+				OpenChestEvent:FireServer(currentChest.Name)
+			else
+				print("DEBUG: Clicked something, but it's not a chest or too far: " .. hitPart.Name .. " (Distance: " .. math.floor(distanceToHit) .. " studs)")
+			end
+		end
+	end
+end)
+
+-- --- Hover Detection Logic (RunService.RenderStepped) ---
+local currentHoveredChest = nil
+
+RunService.RenderStepped:Connect(function()
+	if not chestFrame.Visible then
+		if not character then return end
+		if not humanoidRootPart then return end
+		if not camera then return end
+
+		local mouse = LocalPlayer:GetMouse()
+		local rayOrigin = camera.CFrame.Position
+		local rayDirection = (mouse.Hit.p - rayOrigin).Unit * INTERACTION_DISTANCE
+
+		local raycastParams = Instance.new("RaycastParams") -- Ensure RaycastParams is created here
+		raycastParams.FilterDescendantsInstances = {character}
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+		local raycastResult = Workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+
+		local newHoveredChest = nil
+		if raycastResult and raycastResult.Instance then
+			local hitPart = raycastResult.Instance
+			local distanceToHit = (hitPart.Position - humanoidRootPart.Position).Magnitude
+			if string.find(hitPart.Name, "Chest_", 1, true) and distanceToHit <= INTERACTION_DISTANCE then
+				newHoveredChest = hitPart
+			end
+		end
+
+		if newHoveredChest ~= currentHoveredChest then
+			if currentHoveredChest then
+				hoverNameBillboardGui.Enabled = false
+				hoverNameBillboardGui.Parent = screenGui
+				print("DEBUG: Hover UI hidden for " .. (currentHoveredChest.Name or "unknown") .. ".")
+			end
+
+			if newHoveredChest then
+				hoverNameBillboardGui.Parent = newHoveredChest
+				hoverNameBillboardGui.Adornee = newHoveredChest
+				hoverNameBillboardGui.Enabled = true
+				hoverNameTextLabel.Text = "Click to open " .. newHoveredChest.Name:gsub("Chest_", ""):gsub("_", " ") 
+				print("DEBUG: Hover UI shown for " .. newHoveredChest.Name .. ".")
+			end
+			currentHoveredChest = newHoveredChest
+		else
+			if not character or not humanoidRootPart or not camera then
+				if currentHoveredChest then
+					hoverNameBillboardGui.Enabled = false
+					hoverNameBillboardGui.Parent = screenGui
+					currentHoveredChest = nil
+				end
+			end
+		end
+	else
+		if currentHoveredChest then
+			hoverNameBillboardGui.Enabled = false
+			hoverNameBillboardGui.Parent = screenGui
+			currentHoveredChest = nil
+			print("DEBUG: Hover UI hidden because chest UI is open.")
+		end
+	end
+end)
+
+-- Listen for the server to send chest inventory data back
+UpdateChestUI.OnClientEvent:Connect(function(chestName, inventoryData)
+	-- Get currentChest via UIManager to ensure it's up-to-date
+	local currentOpenChest = UIManager:GetCurrentChest() 
+	if currentOpenChest and currentOpenChest.Name == chestName then
+		openChestUI(chestName, inventoryData)
+	else
+		print("DEBUG: Received Chest UI update for a different chest or no current chest.")
+	end
+end)
+
+-- Listener for updating player's main inventory UI
+UpdateInventoryUI.OnClientEvent:Connect(function(inventoryData)
+	print("DEBUG: Received main inventory update from server:", inventoryData)
+	-- This event will be handled by InventoryManager.
+end)
+
+-- --- EXPOSE ChestUIManager's elements/functions to UIManager ---
+-- These must be assigned AFTER the elements are created.
+task.spawn(function() -- Use task.spawn to allow the rest of the script to run first
+	task.wait(0.5) -- Small delay to ensure UIManager is also ready to receive references
+	UIManager:SetChestUIManager(script)
+	-- We already assign script.chestGridFrame at the top.
+	print("DEBUG: ChestUIManager has exposed its references to UIManager.")
+end)
+
+print("DEBUG: ChestUIManager script fully initialized.")
